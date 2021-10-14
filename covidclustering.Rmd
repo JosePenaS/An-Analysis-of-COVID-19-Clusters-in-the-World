@@ -1,0 +1,566 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+setwd("C:/Users/Cayoyo/Desktop/R")
+
+library(tidyverse)
+
+library(tidymodels)
+
+covid<-read.csv("owid-covid-data.csv")
+```
+
+```{r}
+glimpse(covid)
+
+```
+
+
+```{r}
+
+library(lubridate)
+
+base1<-covid %>% mutate(date=ymd(date),month=floor_date(date, "month"))%>% filter(month=="2021-09-01") %>% group_by(location) %>% summarize(total_cases_per_million =max(total_cases_per_million  ),new_cases_per_million=sum(new_cases_per_million),total_deaths_per_million=max(total_deaths_per_million),new_deaths_per_million=sum(new_deaths_per_million),reproduction_rate=mean(reproduction_rate,na.rm=TRUE),
+icu_patients_per_million=mean(icu_patients_per_million,na.rm=TRUE),weekly_hosp_admissions_per_million=mean(weekly_hosp_admissions_per_million,na.rm=TRUE),new_tests_per_thousand=sum(new_tests_per_thousand,na.rm=TRUE),positive_rate=mean(positive_rate,na.rm=TRUE),tests_per_case=mean(tests_per_case,na.rm=TRUE),total_vaccinations_per_hundred=max(total_vaccinations_per_hundred,na.rm=TRUE),new_vaccinations=mean(new_vaccinations,na.rm=TRUE),
+people_vaccinated_per_hundred=max(people_vaccinated_per_hundred,na.rm=TRUE),people_fully_vaccinated_per_hundred=max(people_fully_vaccinated_per_hundred,na.rm=TRUE),total_boosters_per_hundred=max(total_boosters_per_hundred,na.rm=TRUE),stringency_index=mean(stringency_index,na.rm=TRUE)) 
+
+base1
+
+```
+
+
+```{r}
+base2<-covid %>% group_by(location) %>% summarize(total_tests=max(total_tests,na.rm=TRUE),total_tests_per_thousand=max(total_tests_per_thousand,na.rm = TRUE))
+
+base3<-covid %>% select(location,population:human_development_index) %>% group_by(location) %>% summarize(across(where(is.numeric), ~mean(.,na.rm=TRUE)))
+
+
+```
+
+
+#hacer el merge
+
+```{r}
+base<-base1 %>% left_join(base2)
+
+data<-base%>% left_join(base3)
+
+
+```
+
+
+#new_vaccinations arreglar con con mutate
+
+
+```{r}
+
+data<-data %>% mutate(new_vaccinations_per_millions=new_vaccinations/(population/1000000)) %>% select (-new_vaccinations)
+
+```
+
+
+
+```{r}
+
+colSums(is.na(data))
+
+```
+
+
+#borrar total cases 0 y continentes
+
+```{r}
+
+data1<-data %>% filter(!is.na(total_cases_per_million)&!(location %in% c("Africa","Asia","Europe","European Union","North America","South America","World","Oceania")))
+  
+```
+
+#llegar booster na con 0's
+
+```{r}
+
+data1<-data1 %>% mutate(total_boosters_per_hundred= ifelse(total_boosters_per_hundred==-Inf,0,total_boosters_per_hundred))
+
+#cambiar el resto de los -Inf
+
+data1<-data1 %>% mutate(across(c(total_tests,total_vaccinations_per_hundred,people_vaccinated_per_hundred,people_fully_vaccinated_per_hundred,total_tests_per_thousand), ~ifelse(.==-Inf,NA,.)))
+
+
+data1<-data1 %>% mutate(across(c(total_deaths_per_million,new_deaths_per_million,reproduction_rate), ~ifelse(is.na(.),0,.)))
+
+
+data1<-data1 %>%  mutate(across(c(icu_patients_per_million,weekly_hosp_admissions_per_million,positive_rate), ~ifelse(new_deaths_per_million==0,0,.)))
+  
+  
+
+```
+
+
+#revisar los na's de nuevo.
+
+```{r}
+
+colSums(is.na(data1))
+
+```
+
+
+#imputar el resto
+
+#imputar con mediana variables donde no faltan muchas variables
+```{r}
+
+data1<-data1 %>% mutate(across(c(population_density,median_age,aged_65_older,aged_70_older, gdp_per_capita,cardiovasc_death_rate,diabetes_prevalence,life_expectancy,human_development_index,male_smokers), ~ifelse(is.na(.),median(.,na.rm=TRUE),.)))
+
+```
+
+random forest
+
+
+total_vaccinations_per_hundred,people_vaccinated_per_hundred, people_fully_vaccinated_per_hundred
+
+ 
+```{r}
+
+all<-data1 %>% select(c(total_cases_per_million:reproduction_rate,weekly_hosp_admissions_per_million,gdp_per_capita,life_expectancy,population,human_development_index)) %>% na.omit()
+
+library(randomForest)
+
+set.seed(2018)
+quick_RF <- randomForest(x=all[1:10,-6], y=all$weekly_hosp_admissions_per_million[1:10],ntree=100,importance=TRUE)
+
+imp_RF <- importance(quick_RF)
+imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+
+ggplot(imp_DF[1:9,], aes(x=reorder(Variables, MSE), y=MSE, fill=MSE)) + geom_bar(stat = 'identity') + labs(x = 'Variables', y= '% increase MSE if variable is randomly permuted') + coord_flip() +theme_light()+ theme(legend.position="none")
+```
+
+
+new_case, new,deaths,reproduc,hdi,totaldeaths,gdp, total_cases
+#imputar con regresión las que no sean tan malas o con random forest
+
+```{r}
+library(recipes)
+
+impute_rec <- recipe(total_vaccinations_per_hundred ~ ., data = data1) %>%
+  step_impute_knn(total_vaccinations_per_hundred,impute_with=imp_vars(gdp_per_capita,human_development_index,life_expectancy,new_cases_per_million),neighbors=10)
+
+
+imputed <- prep(impute_rec) %>% juice()
+
+```
+
+#Otras
+
+          
+  
+```{r}
+all<-imputed %>% select(c(total_cases_per_million:reproduction_rate,icu_patients_per_million,gdp_per_capita,life_expectancy,population,human_development_index,total_vaccinations_per_hundred,people_fully_vaccinated_per_hundred,people_vaccinated_per_hundred,hospital_beds_per_thousand,stringency_index,positive_rate,female_smokers,total_tests,total_tests_per_thousand,extreme_poverty,new_vaccinations_per_millions,tests_per_case,handwashing_facilities,weekly_hosp_admissions_per_million)) %>% na.omit()
+
+        
+
+library(randomForest)
+
+set.seed(2018)
+quick_RF <- randomForest(x=all[1:24,-6], y=all$icu_patients_per_million[1:24],ntree=100,importance=TRUE)
+
+imp_RF <- importance(quick_RF)
+imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+
+imp_DF
+
+ggplot(imp_DF[1:12,], aes(x=reorder(Variables, MSE), y=MSE, fill=MSE)) + geom_bar(stat = 'identity') + labs(x = 'Variables', y= '% increase MSE if variable is randomly permuted') + coord_flip() +theme_light()+ theme(legend.position="none")
+
+```
+
+
+
+
+
+
+```{r}
+library(recipes)
+
+impute_rec <- recipe(people_fully_vaccinated_per_hundred ~ ., data= imputed) %>%
+  step_impute_knn(people_fully_vaccinated_per_hundred,impute_with=imp_vars(gdp_per_capita,human_development_index,life_expectancy,total_vaccinations_per_hundred,population,human_development_index),neighbors=10)%>%
+  step_impute_knn(people_vaccinated_per_hundred,impute_with=imp_vars(people_fully_vaccinated_per_hundred,total_vaccinations_per_hundred,gdp_per_capita,human_development_index,new_cases_per_million),neighbors=10)%>%
+  step_impute_knn(hospital_beds_per_thousand,impute_with=imp_vars(new_cases_per_million,total_deaths_per_million,population,human_development_index,people_fully_vaccinated_per_hundred,people_vaccinated_per_hundred,total_vaccinations_per_hundred),neighbors=10)%>%
+  step_impute_knn(stringency_index,impute_with=imp_vars(new_deaths_per_million,people_fully_vaccinated_per_hundred,total_vaccinations_per_hundred,reproduction_rate,life_expectancy,hospital_beds_per_thousand),neighbors=10)%>%
+  step_impute_knn(positive_rate,impute_with=imp_vars(new_cases_per_million,total_vaccinations_per_hundred,people_vaccinated_per_hundred,life_expectancy,people_fully_vaccinated_per_hundred,human_development_index,hospital_beds_per_thousand,gdp_per_capita,stringency_index,new_deaths_per_million),neighbors=10)%>%
+  step_impute_knn(female_smokers,impute_with=imp_vars(life_expectancy,human_development_index,total_cases_per_million,total_deaths_per_million,positive_rate,people_vaccinated_per_hundred,people_fully_vaccinated_per_hundred,new_cases_per_million,stringency_index),neighbors=10)%>%
+  step_impute_knn(total_tests,impute_with=imp_vars(human_development_index,gdp_per_capita,hospital_beds_per_thousand,population,stringency_index,people_fully_vaccinated_per_hundred,total_vaccinations_per_hundred,life_expectancy,reproduction_rate),neighbors=10)%>%
+  step_impute_knn(total_tests_per_thousand,impute_with=imp_vars(people_fully_vaccinated_per_hundred,human_development_index,gdp_per_capita,positive_rate,total_vaccinations_per_hundred,total_tests,people_vaccinated_per_hundred,life_expectancy,new_deaths_per_million,female_smokers,total_deaths_per_million,total_cases_per_million),neighbors=10)%>%
+  step_impute_knn(extreme_poverty,impute_with=imp_vars(gdp_per_capita,total_tests_per_thousand,total_vaccinations_per_hundred,total_cases_per_million,life_expectancy,human_development_index),neighbors=10)%>%
+  step_impute_knn(new_vaccinations_per_millions,impute_with=imp_vars(stringency_index,new_deaths_per_million,life_expectancy,female_smokers,population,total_vaccinations_per_hundred,positive_rate),neighbors=10)%>%
+  step_impute_knn(tests_per_case,impute_with=imp_vars(positive_rate,total_deaths_per_million,total_tests,total_tests_per_thousand,new_deaths_per_million,reproduction_rate,population,extreme_poverty,new_cases_per_million,people_fully_vaccinated_per_hundred),neighbors=10)%>%
+  step_impute_knn(handwashing_facilities,impute_with=imp_vars(extreme_poverty,gdp_per_capita,total_tests_per_thousand,human_development_index,life_expectancy,positive_rate),neighbors=10)%>%
+  step_impute_knn(weekly_hosp_admissions_per_million,impute_with=imp_vars(new_deaths_per_million,new_cases_per_million,handwashing_facilities,positive_rate,tests_per_case,total_cases_per_million,gdp_per_capita,total_deaths_per_million,female_smokers,total_tests,extreme_poverty),neighbors=10)%>%
+  step_impute_knn(icu_patients_per_million,impute_with=imp_vars(new_cases_per_million,new_deaths_per_million,weekly_hosp_admissions_per_million,gdp_per_capita,hospital_beds_per_thousand,handwashing_facilities,total_cases_per_million,total_vaccinations_per_hundred,total_deaths_per_million,people_vaccinated_per_hundred,life_expectancy,people_fully_vaccinated_per_hundred,positive_rate,human_development_index),neighbors=10)
+
+
+
+
+
+
+
+imputed <- prep(impute_rec) %>% juice()
+
+```
+
+
+
+```{r}
+library(recipes)
+
+impute_rec <- recipe(total_cases_per_million ~ ., data = data1) %>%
+  step_impute_knn(all_predictors(),neighbors = 10)
+
+imputed2 <- prep(impute_rec) %>% juice()
+
+```
+
+
+
+
+
+```{r}
+
+colSums(is.na(imputed))
+
+```
+
+
+##Logaritmo y escalar los valores
+
+```{r}
+
+normalized<-imputed %>%as_tibble() %>% 
+  
+     mutate(across(where(is.numeric), ~log(.+1))) %>% 
+
+   mutate(across(where(is.numeric), ~scale(.)))
+
+```
+
+
+install.packages("ggcorrplot")
+library(ggcorrplot)
+
+Exploratorio. Empesar por un diagrama de correlación
+```{r}
+library(corrplot)
+
+
+covid.1<-normalized %>% select(total_deaths_per_million:total_tests_per_thousand,new_vaccinations_per_millions:people_fully_vaccinated_per_hundred,total_tests) %>% janitor::clean_names(case="snake")
+
+
+M = cor(covid.1)
+corrplot(M, order = 'AOE')
+
+ggcorrplot(M, type = 'upper', outline.col = "white",
+          colors = c("#1679a1", "white", "#f8766d"),
+          lab = TRUE)
+
+```
+
+
+
+##############PCA
+
+
+
+
+```{r}
+covid.1<-normalized %>% select(total_cases_per_million:total_tests_per_thousand,new_vaccinations_per_millions:people_fully_vaccinated_per_hundred,-total_tests)
+
+rownames(covid.1) <- normalized$location
+
+
+myPCA <- prcomp(covid.1)
+
+library(reshape2)
+
+melted <- melt(myPCA$rotation[,1:9])
+
+ggplot(data = melted) +
+        theme(legend.position = "none", axis.text.x = element_blank(), 
+              axis.ticks.x = element_blank()) + 
+        xlab("Covid indicator measurements") +
+        ylab("Relative importance in each principle component") +
+        ggtitle("Variables in Principal Component Analysis") +
+        geom_bar(aes(x=Var1, y=value, fill=Var1), stat="identity") +
+        facet_wrap(~Var2)
+
+
+```
+
+```{r}
+ggplot(data = melted[melted$Var2 == "PC1",]) +theme_light()+
+         theme(legend.position = "none", 
+               axis.text.x= element_text(angle=45, hjust = 1), 
+               axis.ticks.x = element_blank()) + 
+         xlab("Health care indicator measurements") +
+         ylab("Relative importance in principle component") +
+         ggtitle("Variables in PC1") +
+         geom_bar(aes(x=Var1, y=value, fill=Var1), stat="identity")
+```
+
+We can see here that contries with higher positive values for PC1 
+
+
+
+
+
+```{r}
+library(ggfortify)
+library(ggrepel)
+
+
+set.seed(2346)
+autoplot(kmeans(covid.1, 7), data = covid.1, size = 2, aes = 0.8) + 
+        ggtitle("K-Means Clustering of Countries") +
+        theme(legend.position="none")+theme_light()
+
+```
+
+
+
+
+
+```{r}
+library(dendextend)
+myDend <- covid.1 %>% dist %>% hclust(method = "ward.D") %>% 
+    as.dendrogram %>%
+    set("branches_k_color", k = 5) %>% 
+    set("labels_col", k=5) %>%
+    hang.dendrogram(hang_height=0.7)
+
+par(mar = c(3,3,3,7))
+
+plot(myDend, horiz = FALSE, hang = -1, cex = 0.4,
+     main = "Clustering in")
+```
+
+
+
+
+```{r}
+
+covid.1<-normalized %>% select(location,new_cases_per_million,new_deaths_per_million:total_tests_per_thousand,new_vaccinations_per_millions:people_fully_vaccinated_per_hundred,-total_tests)
+
+kclusts <-
+  tibble(k = 1:9) %>%
+  mutate(
+    kclust = map(k, ~ kmeans(select(covid.1, -location), .x)),
+    glanced = map(kclust, glance),
+  )
+
+kclusts %>%
+  unnest(cols = c(glanced)) %>%
+  ggplot(aes(k, tot.withinss)) +
+  geom_line(alpha = 0.5, size = 1.2, color = "midnightblue") +
+  geom_point(size = 2, color = "midnightblue")
+```
+
+```{r}
+data_df <- as.data.frame(covid.1) 
+rownames(data_df) <- data_df[,1] 
+data_df <- data_df[,-1]
+
+```
+
+
+```{r}
+fviz_nbclust(data_df, FUN = hcut, method = "silhouette")
+
+```
+
+
+
+```{r}
+
+library(dendextend)
+myDend <- covid.1 %>% dist %>% hclust(method = "ward.D") %>% 
+    as.dendrogram %>%
+    set("branches_k_color", k = 5) %>% 
+    set("labels_col", k=5) %>%
+  set("labels_cex", 0.6)%>% 
+    hang.dendrogram(hang_height=0.7)
+par(mar = c(3,3,3,7))
+
+plot(myDend, horiz = FALSE, hang = -1, cex = 0.4,
+     main = "Clustering in")
+```
+
+
+
+
+```{r}
+covid_clust <- kmeans(select(covid.2, -location), centers = 5)
+summary(employment_clust)
+```
+
+```{r}
+library(broom)
+tidy(covid_clust)
+```
+
+Aquí se pueden explorar las diferencias
+
+
+
+
+```{r}
+augment(covid_clust, covid.1) %>%
+  ggplot(aes(new_cases_per_million, new_deaths_per_million, color = .cluster)) +
+  geom_point()+theme_light()
+```
+
+
+```{r}
+library(plotly)
+
+covid.3 <- tibble::rownames_to_column(covid.1, "location")
+
+p <- augment(covid_clust, covid.3) %>%  mutate(text = paste("Country: ", location)) %>%
+  ggplot(aes(total_cases_per_million, total_deaths_per_million, color = .cluster,text=text)) +
+  geom_point()+theme_light()
+
+ggplotly(p, tooltip="text", height = 500)
+```
+
+
+
+```{r}
+
+covid.4<-covid.3%>%  mutate(text = paste("Country: ", location))
+
+set.seed(2346)
+
+p<-autoplot(kmeans(covid.1, 5), data = covid.1) + 
+        ggtitle("K-Means Clustering of Countries") +
+        theme(legend.position="none")+theme_light()+ 
+        geom_point(aes(PC1, PC2, 
+                             text=covid.3$location,colour=factor(kmeans(covid.1, 5)$cluster)))
+
+
+
+
+ggplotly(p, tooltip="text", height = 500)
+
+```
+
+
+
+
+vamos a hacer un clustering con k igual 3
+```{r}
+contries_clust <- kmeans(covid.1, centers = 5)
+summary(contries_clust)
+```
+
+
+```{r}
+
+library(factoextra)
+
+fviz_cluster(contries_clust, geom = "point", data = covid.1) + ggtitle("k = 4") + theme_bw()
+```
+
+Mirando los PCA
+
+```{r}
+prcomp(data_df)
+
+```
+
+```{r}
+kmeans4_data <- kmeans(data_df, centers = 5) # k of 4 based on the elbow analysis
+clust4_data <- kmeans4_data$cluster # Saving saperate the cluster component
+data_kmeans4 <- mutate(data_df, group_kmeans = clust4_data) # Adding our clusters to the main data
+head(data_kmeans4)
+
+```
+
+#####Arboles de decision
+
+
+```{r}
+
+all<-normalized %>% select(total_cases_per_million,population:human_development_index)
+
+  
+  
+  
+ set.seed(2018)
+quick_RF <- randomForest(x=all[1:16,-1], y=all$total_cases_per_million[1:16],ntree=10000,importance=TRUE)
+
+imp_RF <- importance(quick_RF)
+imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+
+ggplot(imp_DF[1:10,], aes(x=reorder(Variables, MSE), y=MSE, fill=MSE)) + geom_bar(stat = 'identity') + labs(x = 'Variables', y= '% increase MSE if variable is randomly permuted') + coord_flip() +theme_light()+ theme(legend.position="none")
+
+``` 
+  
+
+
+
+
+```{r}
+normalized %>% ggplot(aes(x=total_deaths_per_million,y=human_development_index))+geom_point()+theme_light()
+```
+
+  
+###Ahora con muertes
+
+
+
+```{r}
+
+all<-normalized %>% select(total_deaths_per_million,population:human_development_index)
+
+ set.seed(2018)
+quick_RF <- randomForest(x=all[1:16,-1], y=all$total_deaths_per_million[1:16],ntree=10000,importance=TRUE)
+
+imp_RF <- importance(quick_RF)
+imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+
+ggplot(imp_DF[1:10,], aes(x=reorder(Variables, MSE), y=MSE, fill=MSE)) + geom_bar(stat = 'identity') + labs(x = 'Variables', y= '% increase MSE if variable is randomly permuted') + coord_flip() +theme_light()+ theme(legend.position="none")
+
+```
+
+###vaccines
+```{r}
+all<-normalized %>% select(people_fully_vaccinated_per_hundred,population:human_development_index)
+
+  
+  
+  
+ set.seed(2018)
+quick_RF <- randomForest(x=all[1:16,-1], y=all$people_fully_vaccinated_per_hundred[1:16],ntree=10000,importance=TRUE)
+
+imp_RF <- importance(quick_RF)
+imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+
+ggplot(imp_DF[1:10,], aes(x=reorder(Variables, MSE), y=MSE, fill=MSE)) + geom_bar(stat = 'identity') + labs(x = 'Variables', y= '% increase MSE if variable is randomly permuted') + coord_flip() +theme_light()+ theme(legend.position="none")
+
+``` 
+
+
+
+
+
+
+
+
+
+
+
